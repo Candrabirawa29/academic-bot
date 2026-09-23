@@ -9,8 +9,6 @@ async function getTasks(userId) {
   return data;
 }
 
-// Ranking berdasarkan Focus Score — dihitung backend, bot tidak menghitung ulang sendiri
-// (satu sumber kebenaran yang sama dipakai dashboard, lihat lib/scoring.ts di academic-tracker)
 async function getFocusRanking(userId) {
   const res = await apiClient.get('/api/tasks/focus', { params: { userId } });
   const data = res.data?.data;
@@ -20,4 +18,22 @@ async function getFocusRanking(userId) {
   return data;
 }
 
-module.exports = { getTasks, getFocusRanking };
+// PENTING: nama field di sini HARUS persis sama dengan yang dibaca
+// app/api/tasks/route.ts di backend. Field yang salah nama bukan error —
+// backend diam-diam pakai default schema, atau (untuk checklists) crash
+// kalau nggak dikirim sama sekali.
+async function createTask(userId, taskData) {
+  const res = await apiClient.post('/api/tasks', {
+    userId,
+    title: taskData.title,
+    currentDeadline: taskData.currentDeadline,
+    course: taskData.course || null,
+    difficulty: taskData.difficulty || 'medium',
+    basePriority: taskData.basePriority || 'medium',
+    estimatedTimeMinutes: taskData.estimatedTimeMinutes ?? 60,
+    checklists: taskData.checklists || [],
+  });
+  return res.data;
+}
+
+module.exports = { getTasks, getFocusRanking, createTask };
