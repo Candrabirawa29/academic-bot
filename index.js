@@ -1,6 +1,5 @@
 require('dotenv').config();
 
-const express = require('express');
 const cron = require('node-cron');
 
 const whatsappService = require('./services/whatsappService');
@@ -9,8 +8,6 @@ const commandService = require('./services/commandService');
 const messageBuilders = require('./services/messageBuilders');
 const taskService = require('./services/taskService');
 
-const app = express();
-const port = process.env.PORT || 10000;
 
 const USER_ID = process.env.USER_ID;
 const NOMOR_WA = process.env.WHATSAPP_NUMBER;
@@ -23,12 +20,6 @@ if (!USER_ID || !NOMOR_WA || !process.env.API_BASE_URL) {
 }
 
 const CHAT_ID = `${NOMOR_WA}@c.us`;
-
-// ==========================================
-// SERVER PANCINGAN (biar hosting nggak nge-sleep karena nggak ada port terbuka)
-// ==========================================
-app.get('/', (req, res) => res.send('✅ Academic Assistant Bot Aktif!'));
-app.listen(port, () => console.log(`Server pancingan jalan di port ${port}`));
 
 // ==========================================
 // WHATSAPP CLIENT + REMINDER ENGINE + COMMAND HANDLER
@@ -78,18 +69,51 @@ whatsappService.init({
     );
   },
 
-  onMessage: async (msg) => {
-    if (msg.from !== CHAT_ID) return;
+     onMessage: async (msg) => {
+    const isPrivateChat = msg.from === CHAT_ID;
+    const isGroupChat = msg.from.endsWith('@g.us');
 
-    const command = commandService.resolveCommand(msg.body);
-    if (!command) return; // nggak dikenali — bot diam, jangan asal jawab/spam
+    if (!isPrivateChat && !isGroupChat) return;
+
+    let textContent = msg.body.trim();
+    const activeRoomId = msg.from;
+
+    // ========================================================
+    // 🛡️ FILTER KHUSUS UNTUK CHAT DI DALAM GRUP WHATSAPP
+    // ========================================================
+    if (isGroupChat) {
+      // 1. Cek apakah pesan diawali dengan !kayla
+      if (textContent.toLowerCase().startsWith('!kayla')) {
+        // Hapus kata '!kayla' dari teks agar tidak ikut dibaca AI
+        textContent = textContent.substring(6).trim(); 
+      } 
+      // 2. Atau cek apakah bot di-tag/mention di dalam grup
+      else if (msg.mentionedIds && msg.mentionedIds.includes(msg.to)) {
+        // Bersihkan teks tag (misal @628xxx) agar AI menerima teks bersih
+        textContent = textContent.replace(/@\d+/g, '').trim();
+      } 
+      // 3. Jika tidak di-tag dan tidak pakai command, bot DIAM (abaikan chat grup)
+      else {
+        return; 
+      }
+      
+      // Jika setelah dihapus command-nya ternyata teksnya kosong, jangan kirim apa-apa
+      if (!textContent) return;
+    }
+
+    // ========================================================
+    // PENGIRIMAN PERINTAH KE AGENT & GEMINI
+    // ========================================================
+    const command = commandService.resolveCommand(textContent, activeRoomId);
+    if (!command) return; 
 
     try {
-      const reply = await commandService.handleCommand(command, USER_ID);
+      const reply = await commandService.handleCommand(command, activeRoomId);
       if (reply) await msg.reply(reply);
     } catch (error) {
       console.error(`❌ Gagal memproses command "${command}":`, error.message);
       await msg.reply('Lagi error narik data dari server, coba lagi nanti.').catch(() => {});
     }
   },
+
 });
