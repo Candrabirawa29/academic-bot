@@ -1,22 +1,17 @@
 const taskService = require('./taskService');
 const notificationService = require('./notificationService');
 const whatsappService = require('./whatsappService');
-const messageBuilders = require('./messageBuilders');
-
-// Urut dari yang paling jauh ke paling dekat — dicek satu-satu,
-// yang paling relevan (paling dekat yang sudah terlewati) yang dikirim.
-const DEADLINE_THRESHOLDS = [
-  { type: 'deadline_h3d', hours: 72 },
-  { type: 'deadline_h1d', hours: 24 },
-  { type: 'deadline_h3h', hours: 3 },
-  { type: 'deadline_h30m', hours: 0.5 },
-];
+const contextService = require('./contextService');
+const personalityService = require('./personalityService');
 
 async function sendIfNotYet(taskId, notificationType, chatId, buildMessage) {
   const already = await notificationService.hasBeenNotified(taskId, notificationType);
   if (already) return;
 
-  const sent = await whatsappService.sendMessage(chatId, buildMessage());
+  const message = buildMessage();
+  if (!message) return; // personality bisa return null kalau fitur terkait dimatiin config
+
+  const sent = await whatsappService.sendMessage(chatId, message);
   if (sent) {
     await notificationService.markAsNotified(taskId, notificationType);
   }
@@ -24,54 +19,55 @@ async function sendIfNotYet(taskId, notificationType, chatId, buildMessage) {
 
 async function processTask(task, chatId) {
   try {
-    if (task.status === 'completed') return;
-
     const now = new Date();
-    const deadline = new Date(task.currentDeadline);
-    const hoursLeft = (deadline.getTime() - now.getTime()) / 3600000;
 
-    // 1. Overdue — kalau sudah lewat, ini prioritas utama, skip threshold lain
-    if (hoursLeft < 0) {
-      await sendIfNotYet(task.id, 'overdue', chatId, () =>
-        messageBuilders.buildOverdueReminder(task)
+    // Completion praise — sekali per task, begitu status kedeteksi completed.
+    // Ditaruh paling atas: task yang udah selesai nggak perlu dicek deadline/stagnation lagi.
+    if (task.status === 'completed') {
+      await sendIfNotYet(task.id, 'completion_praise', chatId, () =>
+        personalityService.generateCompletionMessage(task)
       );
       return;
     }
 
-    // 2. Deadline thresholds — kirim satu yang paling dekat & relevan
-    for (const threshold of DEADLINE_THRESHOLDS) {
-      if (hoursLeft <= threshold.hours) {
-        await sendIfNotYet(task.id, threshold.type, chatId, () =>
-          messageBuilders.buildDeadlineReminder(task, hoursLeft)
-        );
-        break;
-      }
+    const context = contextService.buildTaskContext(task, now);
+    const hoursLeft = context.deadline_hours_remaining;
+
+    // 1. Overdue — prioritas utama, skip tier deadline lain
+    if (hoursLeft < 0) {
+      await sendIfNotYet(task.id, 'overdue', chatId, () =>
+        personalityService.generateOverdueMessage(task)
+      );
+      return;
     }
 
-    // 3. Preparation reminder — barang bawaan belum siap, deadline < 24 jam
+    // 2. Deadline tier: gentle → reminder → concerned → nagging → urgent.
+    // Satu kali kirim per tier per task (dedup key menyertakan nama tier).
+    await sendIfNotYet(task.id, `deadline_tier_${context.urgency_tier}`, chatId, () =>
+      personalityService.generateDeadlineMessage(context, task)
+    );
+
+    // 3. Preparation reminder — barang bawaan belum siap, deadline <= 24 jam
     if (hoursLeft <= 24) {
       const uncheckedPrep = task.checklists.filter(
         (c) => c.type === 'preparation_item' && !c.isChecked
       );
       if (uncheckedPrep.length > 0) {
         await sendIfNotYet(task.id, 'preparation', chatId, () =>
-          messageBuilders.buildPreparationReminder(task, uncheckedPrep)
+          personalityService.generatePreparationMessage(task, uncheckedPrep)
         );
       }
     }
 
-    // 4. Progress stagnation — belum berubah 3+ hari.
-    // Notification type menyertakan jumlah hari (stagnation_3d, stagnation_4d, dst)
-    // supaya reminder ini nyusul lagi tiap bertambah 1 hari, bukan cuma sekali seumur hidup.
-    if (task.progressUpdatedAt) {
+    // 4. Progress stagnation — dedup key menyertakan jumlah hari, jadi nyusul
+    // tiap bertambah 1 hari, bukan cuma sekali seumur hidup.
+    if (context.progress_stagnant) {
       const daysStagnant = Math.floor(
         (now.getTime() - new Date(task.progressUpdatedAt).getTime()) / 86400000
       );
-      if (daysStagnant >= 3) {
-        await sendIfNotYet(task.id, `stagnation_${daysStagnant}d`, chatId, () =>
-          messageBuilders.buildStagnationReminder(task, daysStagnant)
-        );
-      }
+      await sendIfNotYet(task.id, `stagnation_${daysStagnant}d`, chatId, () =>
+        personalityService.generateStagnationMessage(task, daysStagnant)
+      );
     }
   } catch (error) {
     // Error di satu task TIDAK BOLEH menghentikan proses task lain
